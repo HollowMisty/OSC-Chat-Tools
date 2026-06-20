@@ -4,3 +4,7 @@ please-do-not-delete.txt
 osc-chat-tools.spec
 OCT_debug_log.txt
 /__pycache__/
+.venv/
+__pycache__/
+*.pyc
+.idea/

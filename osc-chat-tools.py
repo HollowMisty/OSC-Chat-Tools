@@ -17,9 +17,14 @@ import keyboard
 import asyncio
 import psutil
 import webbrowser
-from winsdk.windows.media.control import \
-    GlobalSystemMediaTransportControlsSessionManager as MediaManager
-import winsdk.windows.media.control as wmc
+try:
+    from winrt.windows.media.control import \
+        GlobalSystemMediaTransportControlsSessionManager as MediaManager
+    import winrt.windows.media.control as wmc
+except ImportError:
+    from winsdk.windows.media.control import \
+        GlobalSystemMediaTransportControlsSessionManager as MediaManager
+    import winsdk.windows.media.control as wmc
 from websocket import create_connection # websocket-client
 from pythonosc.dispatcher import Dispatcher
 from pythonosc import osc_server

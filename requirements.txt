@@ -1,0 +1,12 @@
+FreeSimpleGUI
+python-osc
+keyboard
+psutil
+winrt-Windows.Media.Control
+winrt-Windows.Foundation
+websocket-client
+pyperclip
+flask
+pynvml
+tendo
+requests
