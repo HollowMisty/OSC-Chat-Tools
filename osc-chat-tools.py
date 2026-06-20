@@ -43,7 +43,7 @@ from tendo import singleton
 
 run = True
 playMsg = True
-version = "1.5.72"
+version = "1.5.73"
 
 #Deprecated Variables
 deprecated_topTextToggle = False #Deprecated, only in use for converting old save files
@@ -108,7 +108,75 @@ hrDisplay = '💓 {hr}'#in conf
 playTimeDisplay = '⏳{hours}:{remainder_minutes}'#in conf
 mutedDisplay = 'Muted 🔇'#in conf
 unmutedDisplay = '🔊'#in conf
-darkMode = True #in conf
+darkMode = True #in conf (kept for backward compatibility with old configs; selectedTheme is now authoritative)
+
+# Theming system: each theme maps a name to the full set of UI colours.
+# Add new presets here and they automatically appear in the theme dropdown.
+THEMES = {
+  'Dark': {
+    'bgColor': '#333333', 'accentColor': '#4d4d4d', 'fontColor': 'grey85',
+    'buttonColor': '#4d4d4d', 'scrollbarColor': '#4d4d4d',
+    'scrollbarBackgroundColor': '#4d4d4d', 'tabBackgroundColor': '#4d4d4d',
+    'tabTextColor': 'grey85'
+  },
+  'Light': {
+    'bgColor': '#64778d', 'accentColor': '#528b8b', 'fontColor': 'white',
+    'buttonColor': '#283b5b', 'scrollbarColor': '#283b5b',
+    'scrollbarBackgroundColor': '#a6b2be', 'tabBackgroundColor': 'white',
+    'tabTextColor': 'black'
+  },
+  'Midnight': {
+    'bgColor': '#1b1f2a', 'accentColor': '#2b3142', 'fontColor': 'grey85',
+    'buttonColor': '#2b3142', 'scrollbarColor': '#2b3142',
+    'scrollbarBackgroundColor': '#2b3142', 'tabBackgroundColor': '#2b3142',
+    'tabTextColor': 'grey85'
+  },
+  'Forest': {
+    'bgColor': '#22312a', 'accentColor': '#33473d', 'fontColor': 'grey85',
+    'buttonColor': '#33473d', 'scrollbarColor': '#33473d',
+    'scrollbarBackgroundColor': '#33473d', 'tabBackgroundColor': '#33473d',
+    'tabTextColor': 'grey85'
+  },
+  'Purple': {
+    'bgColor': '#2a2139', 'accentColor': '#3b2f5c', 'fontColor': 'grey85',
+    'buttonColor': '#3b2f5c', 'scrollbarColor': '#3b2f5c',
+    'scrollbarBackgroundColor': '#3b2f5c', 'tabBackgroundColor': '#3b2f5c',
+    'tabTextColor': 'grey85'
+  }
+}
+# Ordered list of the colour fields a theme defines (used by the custom colour UI).
+THEME_COLOR_KEYS = ['bgColor', 'accentColor', 'fontColor', 'buttonColor', 'scrollbarColor', 'scrollbarBackgroundColor', 'tabBackgroundColor', 'tabTextColor']
+selectedTheme = 'Dark' #in conf
+customColors = dict(THEMES['Dark']) #in conf
+_appliedTheme = None # the theme currently shown on screen; we only rebuild the window when it changes
+_appliedColors = None
+_firstUIBuild = True # honour minimizeOnStart only on the first build, not on theme rebuilds
+
+def apply_theme(name):
+  # Resolves a theme name (or 'Custom') to colours, sets the colour globals,
+  # and pushes them into FreeSimpleGUI. Call before building a window.
+  global bgColor, accentColor, fontColor, buttonColor, scrollbarColor, scrollbarBackgroundColor, tabBackgroundColor, tabTextColor
+  if name == 'Custom':
+    colors = customColors
+  else:
+    colors = THEMES.get(name, THEMES['Dark'])
+  bgColor = colors['bgColor']
+  accentColor = colors['accentColor']
+  fontColor = colors['fontColor']
+  buttonColor = colors['buttonColor']
+  scrollbarColor = colors['scrollbarColor']
+  scrollbarBackgroundColor = colors['scrollbarBackgroundColor']
+  tabBackgroundColor = colors['tabBackgroundColor']
+  tabTextColor = colors['tabTextColor']
+  sg.set_options(sbar_frame_color=fontColor)
+  sg.set_options(scrollbar_color=scrollbarColor)
+  sg.set_options(button_color=(fontColor, buttonColor))
+  sg.set_options(text_color=fontColor)
+  sg.set_options(background_color=bgColor)
+  sg.set_options(element_background_color=bgColor)
+  sg.set_options(text_element_background_color=bgColor)
+  sg.set_options(sbar_trough_color=scrollbarBackgroundColor)
+  sg.set_options(border_width=0)
 sendBlank = True
 suppressDuplicates = False
 sendASAP = False
@@ -334,6 +402,15 @@ except Exception as e:
   outputLog("Failed to create settings file "+str(e))
 
 
+def _version_tuple(s):
+  # Parse a version string like 'v1.5.73' or 'Version 1.5.73' into a tuple of ints for proper comparison.
+  s = s.lower().replace('version', '').replace('v', '').replace(' ', '').strip()
+  parts = []
+  for p in s.split('.'):
+    digits = ''.join(ch for ch in p if ch.isdigit())
+    parts.append(int(digits) if digits else 0)
+  return tuple(parts)
+
 def update_checker(a):
   global updatePrompt
   global outOfDate
@@ -344,7 +421,7 @@ def update_checker(a):
     response = requests.get(url)
     if response.ok:
           data = response.json()
-          if int(data[0]["tag_name"].replace('v', '').replace('.', '').replace(' ', '').replace('Version', '').replace('version', '')) != int(version.replace('v', '').replace('.', '').replace(' ', '').replace('Version', '').replace('version', '')):
+          if _version_tuple(data[0]["tag_name"]) > _version_tuple(version):
             #print("A new version is available! "+ data[0]["tag_name"].replace('v', '').replace(' ', '').replace('Version', '').replace('version', '')+" > " + version.replace('v', '').replace(' ', '').replace('Version', '').replace('version', ''))
             outputLog("A new version is available! "+ data[0]["tag_name"].replace('v', '').replace(' ', '').replace('Version', '').replace('version', '')+" > " + version.replace('v', '').replace(' ', '').replace('Version', '').replace('version', ''))
             if updatePrompt or a:
@@ -436,7 +513,8 @@ confDataDict = { #this dictionary will always exclude position 0 which is the co
   "1.5.69.42" : ['confVersion', 'message_delay', 'messageString', 'FileToRead', 'scrollText', 'hideSong', 'hideOutside', 'showPaused', 'songDisplay', 'showOnChange', 'songChangeTicks', 'minimizeOnStart', 'keybind_run', 'keybind_afk','topBar', 'middleBar', 'bottomBar', 'pulsoidToken', 'avatarHR', 'blinkOverride', 'blinkSpeed', 'useAfkKeybind', 'toggleBeat', 'updatePrompt', 'oscListenAddress', 'oscListenPort', 'oscSendAddress', 'oscSendPort', 'oscForewordAddress', 'oscForeword', 'oscListen', 'oscForeword', 'logOutput', 'layoutString', 'verticalDivider','cpuDisplay', 'ramDisplay', 'gpuDisplay', 'hrDisplay', 'playTimeDisplay', 'mutedDisplay', 'unmutedDisplay', 'darkMode', 'sendBlank', 'suppressDuplicates', 'sendASAP', 'useMediaManager', 'useSpotifyApi', 'spotifySongDisplay', 'spotifyAccessToken', 'spotifyRefreshToken', 'usePulsoid', 'useHypeRate', 'hypeRateKey', 'hypeRateSessionId','timeDisplayPM', 'timeDisplayAM', 'showSongInfo', 'spotify_client_id', 'useTimeParameters', 'removeParenthesis', 'timerDisplay', 'timerEndStamp'],
   "1.5.70" : ['confVersion', 'message_delay', 'messageString', 'FileToRead', 'scrollText', 'hideSong', 'hideOutside', 'showPaused', 'songDisplay', 'showOnChange', 'songChangeTicks', 'minimizeOnStart', 'keybind_run', 'keybind_afk','topBar', 'middleBar', 'bottomBar', 'pulsoidToken', 'avatarHR', 'blinkOverride', 'blinkSpeed', 'useAfkKeybind', 'toggleBeat', 'updatePrompt', 'oscListenAddress', 'oscListenPort', 'oscSendAddress', 'oscSendPort', 'oscForewordAddress', 'oscForeword', 'oscListen', 'oscForeword', 'logOutput', 'layoutString', 'verticalDivider','cpuDisplay', 'ramDisplay', 'gpuDisplay', 'hrDisplay', 'playTimeDisplay', 'mutedDisplay', 'unmutedDisplay', 'darkMode', 'sendBlank', 'suppressDuplicates', 'sendASAP', 'useMediaManager', 'useSpotifyApi', 'spotifySongDisplay', 'spotifyAccessToken', 'spotifyRefreshToken', 'usePulsoid', 'useHypeRate', 'hypeRateKey', 'hypeRateSessionId','timeDisplayPM', 'timeDisplayAM', 'showSongInfo', 'spotify_client_id', 'useTimeParameters', 'removeParenthesis', 'timerDisplay', 'timerEndStamp'],
   "1.5.71" : ['confVersion', 'message_delay', 'messageString', 'FileToRead', 'scrollText', 'hideSong', 'hideOutside', 'showPaused', 'songDisplay', 'showOnChange', 'songChangeTicks', 'minimizeOnStart', 'keybind_run', 'keybind_afk','topBar', 'middleBar', 'bottomBar', 'pulsoidToken', 'avatarHR', 'blinkOverride', 'blinkSpeed', 'useAfkKeybind', 'toggleBeat', 'updatePrompt', 'oscListenAddress', 'oscListenPort', 'oscSendAddress', 'oscSendPort', 'oscForewordAddress', 'oscForeword', 'oscListen', 'oscForeword', 'logOutput', 'layoutString', 'verticalDivider','cpuDisplay', 'ramDisplay', 'gpuDisplay', 'hrDisplay', 'playTimeDisplay', 'mutedDisplay', 'unmutedDisplay', 'darkMode', 'sendBlank', 'suppressDuplicates', 'sendASAP', 'useMediaManager', 'useSpotifyApi', 'spotifySongDisplay', 'spotifyAccessToken', 'spotifyRefreshToken', 'usePulsoid', 'useHypeRate', 'hypeRateKey', 'hypeRateSessionId','timeDisplayPM', 'timeDisplayAM', 'showSongInfo', 'spotify_client_id', 'useTimeParameters', 'removeParenthesis', 'timerDisplay', 'timerEndStamp'],
-  "1.5.72" : ['confVersion', 'message_delay', 'messageString', 'FileToRead', 'scrollText', 'hideSong', 'hideOutside', 'showPaused', 'songDisplay', 'showOnChange', 'songChangeTicks', 'minimizeOnStart', 'keybind_run', 'keybind_afk','topBar', 'middleBar', 'bottomBar', 'pulsoidToken', 'avatarHR', 'blinkOverride', 'blinkSpeed', 'useAfkKeybind', 'toggleBeat', 'updatePrompt', 'oscListenAddress', 'oscListenPort', 'oscSendAddress', 'oscSendPort', 'oscForewordAddress', 'oscForeword', 'oscListen', 'oscForeword', 'logOutput', 'layoutString', 'verticalDivider','cpuDisplay', 'ramDisplay', 'gpuDisplay', 'hrDisplay', 'playTimeDisplay', 'mutedDisplay', 'unmutedDisplay', 'darkMode', 'sendBlank', 'suppressDuplicates', 'sendASAP', 'useMediaManager', 'useSpotifyApi', 'spotifySongDisplay', 'spotifyAccessToken', 'spotifyRefreshToken', 'usePulsoid', 'useHypeRate', 'hypeRateKey', 'hypeRateSessionId','timeDisplayPM', 'timeDisplayAM', 'showSongInfo', 'spotify_client_id', 'useTimeParameters', 'removeParenthesis', 'timerDisplay', 'timerEndStamp']
+  "1.5.72" : ['confVersion', 'message_delay', 'messageString', 'FileToRead', 'scrollText', 'hideSong', 'hideOutside', 'showPaused', 'songDisplay', 'showOnChange', 'songChangeTicks', 'minimizeOnStart', 'keybind_run', 'keybind_afk','topBar', 'middleBar', 'bottomBar', 'pulsoidToken', 'avatarHR', 'blinkOverride', 'blinkSpeed', 'useAfkKeybind', 'toggleBeat', 'updatePrompt', 'oscListenAddress', 'oscListenPort', 'oscSendAddress', 'oscSendPort', 'oscForewordAddress', 'oscForeword', 'oscListen', 'oscForeword', 'logOutput', 'layoutString', 'verticalDivider','cpuDisplay', 'ramDisplay', 'gpuDisplay', 'hrDisplay', 'playTimeDisplay', 'mutedDisplay', 'unmutedDisplay', 'darkMode', 'sendBlank', 'suppressDuplicates', 'sendASAP', 'useMediaManager', 'useSpotifyApi', 'spotifySongDisplay', 'spotifyAccessToken', 'spotifyRefreshToken', 'usePulsoid', 'useHypeRate', 'hypeRateKey', 'hypeRateSessionId','timeDisplayPM', 'timeDisplayAM', 'showSongInfo', 'spotify_client_id', 'useTimeParameters', 'removeParenthesis', 'timerDisplay', 'timerEndStamp'],
+  "1.5.73" : ['confVersion', 'message_delay', 'messageString', 'FileToRead', 'scrollText', 'hideSong', 'hideOutside', 'showPaused', 'songDisplay', 'showOnChange', 'songChangeTicks', 'minimizeOnStart', 'keybind_run', 'keybind_afk','topBar', 'middleBar', 'bottomBar', 'pulsoidToken', 'avatarHR', 'blinkOverride', 'blinkSpeed', 'useAfkKeybind', 'toggleBeat', 'updatePrompt', 'oscListenAddress', 'oscListenPort', 'oscSendAddress', 'oscSendPort', 'oscForewordAddress', 'oscForeword', 'oscListen', 'oscForeword', 'logOutput', 'layoutString', 'verticalDivider','cpuDisplay', 'ramDisplay', 'gpuDisplay', 'hrDisplay', 'playTimeDisplay', 'mutedDisplay', 'unmutedDisplay', 'darkMode', 'sendBlank', 'suppressDuplicates', 'sendASAP', 'useMediaManager', 'useSpotifyApi', 'spotifySongDisplay', 'spotifyAccessToken', 'spotifyRefreshToken', 'usePulsoid', 'useHypeRate', 'hypeRateKey', 'hypeRateSessionId','timeDisplayPM', 'timeDisplayAM', 'showSongInfo', 'spotify_client_id', 'useTimeParameters', 'removeParenthesis', 'timerDisplay', 'timerEndStamp', 'selectedTheme', 'customColors']
 }
 
 if os.path.isfile('please-do-not-delete.txt'):
@@ -453,6 +531,9 @@ if os.path.isfile('please-do-not-delete.txt'):
           #print(f"{x} = {fixed_list[i]}")
         #print("Successfully Loaded config file version "+fixed_list[0])
         outputLog("Successfully Loaded config file version "+fixed_list[0])
+        # Migrate pre-theming configs: derive the theme from the old darkMode flag.
+        if 'selectedTheme' not in confDataDict[confVersion]:
+          selectedTheme = 'Dark' if darkMode else 'Light'
       else:
         #print('Config file is Too Old! Not Updating Values...')
         outputLog('Config file is Too Old! Not Updating Values...')
@@ -699,6 +780,11 @@ def uiThread():
   global mutedDisplay
   global unmutedDisplay
   global darkMode
+  global selectedTheme
+  global customColors
+  global _appliedTheme
+  global _appliedColors
+  global _firstUIBuild
   global sendBlank
   global suppressDuplicates
   global sendASAP
@@ -730,33 +816,7 @@ def uiThread():
   
   global timerDisplay
   global timerEndStamp
-  if darkMode:
-    bgColor = '#333333'
-    accentColor = '#4d4d4d'
-    fontColor = 'grey85'
-    buttonColor = accentColor
-    scrollbarColor = accentColor
-    scrollbarBackgroundColor = accentColor
-    tabBackgroundColor = accentColor
-    tabTextColor = fontColor
-  else: 
-    bgColor = '#64778d'
-    accentColor = '#528b8b'
-    fontColor = 'white'
-    buttonColor = '#283b5b'
-    scrollbarColor = '#283b5b'
-    scrollbarBackgroundColor = '#a6b2be'
-    tabBackgroundColor = 'white'
-    tabTextColor = 'black'
-  sg.set_options(sbar_frame_color=fontColor)
-  sg.set_options(scrollbar_color=scrollbarColor)
-  sg.set_options(button_color=(fontColor, buttonColor))
-  sg.set_options(text_color=fontColor)
-  sg.set_options(background_color=bgColor)
-  sg.set_options(element_background_color=bgColor)
-  sg.set_options(text_element_background_color=bgColor)
-  sg.set_options(sbar_trough_color=scrollbarBackgroundColor)
-  sg.set_options(border_width=0)
+  apply_theme(selectedTheme)
   sg.set_options(use_ttk_buttons=True)
   sg.set_options(input_elements_background_color=fontColor)
   
@@ -1007,9 +1067,21 @@ def uiThread():
                 [sg.Column([
                   [sg.Checkbox('Minimize on startup', default=False, key='minimizeOnStart', enable_events= True)],
                   [sg.Checkbox('Show update prompt', default=True, key='updatePrompt', enable_events= True)],
-                  [sg.Checkbox('Dark Mode (applies on restart)', default=False, key='darkMode', enable_events=True)],
                   [sg.Checkbox('Show song info on bottom ribbon', default=True, key ='showSongInfo')]
-                ], size=(379, 115))],
+                ], size=(379, 85))],
+                [sg.Frame('Theme', [
+                  [sg.Text('Theme'), sg.Combo(list(THEMES.keys()) + ['Custom'], default_value='Dark', readonly=True, key='selectedTheme', size=(15, 1), enable_events=True)],
+                  [sg.Text('Custom colours (used when Theme = Custom, then press Apply):')],
+                  [sg.Text('Background', size=(20, 1)), sg.Input(key='custom_bgColor', size=(10, 1)), sg.ColorChooserButton('Pick', target='custom_bgColor')],
+                  [sg.Text('Accent', size=(20, 1)), sg.Input(key='custom_accentColor', size=(10, 1)), sg.ColorChooserButton('Pick', target='custom_accentColor')],
+                  [sg.Text('Font', size=(20, 1)), sg.Input(key='custom_fontColor', size=(10, 1)), sg.ColorChooserButton('Pick', target='custom_fontColor')],
+                  [sg.Text('Button', size=(20, 1)), sg.Input(key='custom_buttonColor', size=(10, 1)), sg.ColorChooserButton('Pick', target='custom_buttonColor')],
+                  [sg.Text('Scrollbar', size=(20, 1)), sg.Input(key='custom_scrollbarColor', size=(10, 1)), sg.ColorChooserButton('Pick', target='custom_scrollbarColor')],
+                  [sg.Text('Scrollbar background', size=(20, 1)), sg.Input(key='custom_scrollbarBackgroundColor', size=(10, 1)), sg.ColorChooserButton('Pick', target='custom_scrollbarBackgroundColor')],
+                  [sg.Text('Tab background', size=(20, 1)), sg.Input(key='custom_tabBackgroundColor', size=(10, 1)), sg.ColorChooserButton('Pick', target='custom_tabBackgroundColor')],
+                  [sg.Text('Tab text', size=(20, 1)), sg.Input(key='custom_tabTextColor', size=(10, 1)), sg.ColorChooserButton('Pick', target='custom_tabTextColor')],
+                  [sg.Button('Reset Colours to Selected Theme', key='resetCustomColors')],
+                ], background_color=bgColor)],
                 [sg.Text('Keybindings Configuration', background_color=accentColor, font=('Arial', 12, 'bold'))],
               [sg.Text('You must press Apply for new keybinds to take affect!', background_color=accentColor)],
                 [sg.Column([
@@ -1115,6 +1187,8 @@ def uiThread():
   window = sg.Window('OSC Chat Tools', layout,
                   default_element_size=(12, 1), resizable=True, finalize= True, size=(900, 620), right_click_menu=right_click_menu, icon="osc-chat-tools.exe", titlebar_icon="osc-chat-tools.exe")
   window.set_min_size((500, 350))
+  _appliedTheme = selectedTheme
+  _appliedColors = dict(customColors)
   def resetVars():
     global timerEndStamp
     window['messageInput'].update(value='OSC Chat Tools\nBy Lioncat6')
@@ -1156,7 +1230,15 @@ def uiThread():
     window['playTimeDisplay'].update(value='⏳{hours}:{remainder_minutes}')
     window['mutedDisplay'].update(value='Muted 🔇')
     window['unmutedDisplay'].update(value='🔊')
-    window['darkMode'].update(value=True)
+    window['selectedTheme'].update(value='Dark')
+    window['custom_bgColor'].update(value=THEMES['Dark']['bgColor'])
+    window['custom_accentColor'].update(value=THEMES['Dark']['accentColor'])
+    window['custom_fontColor'].update(value=THEMES['Dark']['fontColor'])
+    window['custom_buttonColor'].update(value=THEMES['Dark']['buttonColor'])
+    window['custom_scrollbarColor'].update(value=THEMES['Dark']['scrollbarColor'])
+    window['custom_scrollbarBackgroundColor'].update(value=THEMES['Dark']['scrollbarBackgroundColor'])
+    window['custom_tabBackgroundColor'].update(value=THEMES['Dark']['tabBackgroundColor'])
+    window['custom_tabTextColor'].update(value=THEMES['Dark']['tabTextColor'])
     window['sendBlank'].update(value=True)
     window['suppressDuplicates'].update(value=False)
     window['sendASAP'].update(value=False)
@@ -1268,7 +1350,15 @@ def uiThread():
         window['playTimeDisplay'].update(value=playTimeDisplay)
         window['mutedDisplay'].update(value=mutedDisplay)
         window['unmutedDisplay'].update(value=unmutedDisplay)
-        window['darkMode'].update(value=darkMode)
+        window['selectedTheme'].update(value=selectedTheme)
+        window['custom_bgColor'].update(value=customColors['bgColor'])
+        window['custom_accentColor'].update(value=customColors['accentColor'])
+        window['custom_fontColor'].update(value=customColors['fontColor'])
+        window['custom_buttonColor'].update(value=customColors['buttonColor'])
+        window['custom_scrollbarColor'].update(value=customColors['scrollbarColor'])
+        window['custom_scrollbarBackgroundColor'].update(value=customColors['scrollbarBackgroundColor'])
+        window['custom_tabBackgroundColor'].update(value=customColors['tabBackgroundColor'])
+        window['custom_tabTextColor'].update(value=customColors['tabTextColor'])
         window['sendBlank'].update(value=sendBlank)
         window['suppressDuplicates'].update(value=suppressDuplicates)
         window['sendASAP'].update(value=sendASAP)
@@ -1340,8 +1430,9 @@ def uiThread():
           time.sleep(.1)
   updateUIThread = Thread(target=updateUI)
   updateUIThread.start()
-  if minimizeOnStart:
-    window.minimize()  
+  if minimizeOnStart and _firstUIBuild:
+    window.minimize()
+  _firstUIBuild = False
   windowAccess = window
   while True:
       event, values = window.read()
@@ -1357,6 +1448,11 @@ def uiThread():
           window['message_file_path_display'].update(value=message_file_path)
       elif event == 'mainTabs':
           current_tab = values['mainTabs']
+      elif event == 'resetCustomColors':
+          # Fill the custom colour fields from the currently selected preset (or Dark) as a starting point.
+          base = THEMES.get(values['selectedTheme'], THEMES['Dark'])
+          for k in THEME_COLOR_KEYS:
+            window['custom_' + k].update(value=base[k])
       elif event == 'Apply':
           confVersion = version
           message_delay = values['msgDelay']
@@ -1400,7 +1496,18 @@ def uiThread():
           playTimeDisplay = values['playTimeDisplay']
           mutedDisplay = values['mutedDisplay']
           unmutedDisplay = values['unmutedDisplay']
-          darkMode = values['darkMode']
+          selectedTheme = values['selectedTheme']
+          customColors = {
+            'bgColor': values['custom_bgColor'],
+            'accentColor': values['custom_accentColor'],
+            'fontColor': values['custom_fontColor'],
+            'buttonColor': values['custom_buttonColor'],
+            'scrollbarColor': values['custom_scrollbarColor'],
+            'scrollbarBackgroundColor': values['custom_scrollbarBackgroundColor'],
+            'tabBackgroundColor': values['custom_tabBackgroundColor'],
+            'tabTextColor': values['custom_tabTextColor']
+          }
+          darkMode = (selectedTheme == 'Dark') # kept in sync for backward compatibility
           sendBlank = values['sendBlank']
           suppressDuplicates = values['suppressDuplicates']
           sendASAP = values['sendASAP']
@@ -1420,10 +1527,14 @@ def uiThread():
           timerDisplay = values['timerDisplay']
           try:
             with open('please-do-not-delete.txt', 'w', encoding="utf-8") as f:
-              f.write(str([confVersion, message_delay, messageString, FileToRead, scrollText, hideSong, hideOutside, showPaused, songDisplay, showOnChange, songChangeTicks, minimizeOnStart, keybind_run, keybind_afk,topBar, middleBar, bottomBar, pulsoidToken, avatarHR, blinkOverride, blinkSpeed, useAfkKeybind, toggleBeat, updatePrompt, oscListenAddress, oscListenPort, oscSendAddress, oscSendPort, oscForewordAddress, oscForeword, oscListen, oscForeword, logOutput, layoutString, verticalDivider,cpuDisplay, ramDisplay, gpuDisplay, hrDisplay, playTimeDisplay, mutedDisplay, unmutedDisplay, darkMode, sendBlank, suppressDuplicates, sendASAP,useMediaManager, useSpotifyApi, spotifySongDisplay, spotifyAccessToken, spotifyRefreshToken, usePulsoid, useHypeRate, hypeRateKey, hypeRateSessionId, timeDisplayPM, timeDisplayAM, showSongInfo, spotify_client_id, useTimeParameters, removeParenthesis, timerDisplay, timerEndStamp]))
+              f.write(str([confVersion, message_delay, messageString, FileToRead, scrollText, hideSong, hideOutside, showPaused, songDisplay, showOnChange, songChangeTicks, minimizeOnStart, keybind_run, keybind_afk,topBar, middleBar, bottomBar, pulsoidToken, avatarHR, blinkOverride, blinkSpeed, useAfkKeybind, toggleBeat, updatePrompt, oscListenAddress, oscListenPort, oscSendAddress, oscSendPort, oscForewordAddress, oscForeword, oscListen, oscForeword, logOutput, layoutString, verticalDivider,cpuDisplay, ramDisplay, gpuDisplay, hrDisplay, playTimeDisplay, mutedDisplay, unmutedDisplay, darkMode, sendBlank, suppressDuplicates, sendASAP,useMediaManager, useSpotifyApi, spotifySongDisplay, spotifyAccessToken, spotifyRefreshToken, usePulsoid, useHypeRate, hypeRateKey, hypeRateSessionId, timeDisplayPM, timeDisplayAM, showSongInfo, spotify_client_id, useTimeParameters, removeParenthesis, timerDisplay, timerEndStamp, selectedTheme, customColors]))
           except Exception as e:
             sg.popup('Error saving config to file:\n'+str(e))
           
+          if selectedTheme != _appliedTheme or customColors != _appliedColors:
+            # Theme changed: rebuild the window in place so it applies without a restart.
+            window.close()
+            return 'rebuild'
       elif event == 'Check For Updates':
         update_checker(True)
       elif event == 'Open Github Page':
@@ -2859,7 +2970,13 @@ vrcRunningCheckThread = Thread(target=vrcRunningCheck)
 vrcRunningCheckThread.start()
 msgThread = Thread(target=runmsg)
 msgThread.start()
-mainUI = Thread(target=uiThread)
+def uiThreadLoop():
+  # Re-runs uiThread whenever a theme change requests a window rebuild,
+  # so themes apply instantly without restarting the program.
+  while True:
+    if uiThread() != 'rebuild':
+      break
+mainUI = Thread(target=uiThreadLoop)
 mainUI.start()
 update_checker(False)
 timeParameterThread = Thread(target=timeParameterUpdate).start()
