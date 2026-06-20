@@ -1277,6 +1277,7 @@ def uiThread():
     window['linkSpotify'].update(text="Link Spotify 🔗", button_color="#00a828")
     #Apply
     window.write_event_value('Apply', '')    
+  ui_running = [True] # per-window flag; set False before a theme rebuild so this window's updater loop stops before the window closes
   def updateUI():
     global bgColor
     global accentColor
@@ -1394,7 +1395,7 @@ def uiThread():
       except Exception as e:
         outputLog('Failed to update UI\n'+str(e))
         pass
-    while run:
+    while run and ui_running[0]:
       if run:
         try:
           if current_tab == 'preview':
@@ -1533,6 +1534,9 @@ def uiThread():
           
           if selectedTheme != _appliedTheme or customColors != _appliedColors:
             # Theme changed: rebuild the window in place so it applies without a restart.
+            # Stop this window's UI updater first so it can't touch the window after it closes.
+            ui_running[0] = False
+            updateUIThread.join(timeout=1)
             window.close()
             return 'rebuild'
       elif event == 'Check For Updates':
