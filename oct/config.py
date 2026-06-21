@@ -91,6 +91,8 @@ class Settings:
     whisperModel: str = "base.en"
     micDevice: str = ""  # "" or "Default" = system default input device
     sttLanguage: str = "en"  # ISO code, or "auto"
+    sttTarget: str = ""  # translate output to this language code ("" = off;
+    # "en" uses Whisper's offline translate, others use Google via deep-translator)
     sttNoiseGate: float = 0.02  # amplitude 0..1 to count a block as speech
     sttSilenceMs: int = 1500  # silence (ms) that ends a spoken phrase
     sttHoldSeconds: int = 8  # how long a transcription stays shown before clearing

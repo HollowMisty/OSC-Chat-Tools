@@ -95,7 +95,7 @@ class MainWindow(QMainWindow):
     afk_toggle_signal = Signal()
     spotify_status_signal = Signal(str)
     log_signal = Signal(str)
-    stt_text_signal = Signal(str)
+    stt_text_signal = Signal(str, str, bool)
     stt_status_signal = Signal(str)
     stt_dl_progress = Signal(str)
     stt_dl_done = Signal(str)
@@ -544,6 +544,12 @@ class MainWindow(QMainWindow):
         for disp, code in STT_LANGUAGES:
             self.stt_lang_combo.addItem(disp, code)
         f.addRow("Language", self.stt_lang_combo)
+        self.stt_target_combo = QComboBox()
+        self.stt_target_combo.addItem("Off (transcribe as spoken)", "")
+        for disp, code in STT_LANGUAGES:
+            if code != "auto":
+                self.stt_target_combo.addItem(disp, code)
+        f.addRow("Translate to", self.stt_target_combo)
         v.addLayout(f)
         v.addWidget(QLabel("Mic sensitivity (lower picks up quieter speech)"))
         grow = QHBoxLayout()
@@ -922,6 +928,8 @@ class MainWindow(QMainWindow):
         self.stt_device_combo.setCurrentText("GPU (CUDA)" if self.settings.sttDevice == "cuda" else "CPU")
         lang_idx = self.stt_lang_combo.findData(self.settings.sttLanguage or "en")
         self.stt_lang_combo.setCurrentIndex(lang_idx if lang_idx >= 0 else self.stt_lang_combo.findData("en"))
+        tgt_idx = self.stt_target_combo.findData(self.settings.sttTarget or "")
+        self.stt_target_combo.setCurrentIndex(tgt_idx if tgt_idx >= 0 else 0)
         self._refresh_cuda_ui()
         mic = self.settings.micDevice or "Default"
         if self.stt_mic_combo.findText(mic) < 0:
@@ -960,6 +968,7 @@ class MainWindow(QMainWindow):
         mic = self.stt_mic_combo.currentText()
         self.settings.micDevice = "" if mic == "Default" else mic
         self.settings.sttLanguage = self.stt_lang_combo.currentData() or "en"
+        self.settings.sttTarget = self.stt_target_combo.currentData() or ""
         self.settings.customColors = dict(self._custom_colors)
         self.settings.keybind_run = self.keybind_run_label.text()
         self.settings.keybind_afk = self.keybind_afk_label.text()
@@ -1330,7 +1339,7 @@ class MainWindow(QMainWindow):
     def _stt_signature(self):
         s = self.settings
         return (s.whisperModel, s.micDevice, s.sttLanguage,
-                round(s.sttNoiseGate, 4), int(s.sttSilenceMs), s.sttDevice)
+                round(s.sttNoiseGate, 4), int(s.sttSilenceMs), s.sttDevice, s.sttTarget)
 
     def _stop_stt(self):
         if self._stt is not None:
@@ -1345,6 +1354,7 @@ class MainWindow(QMainWindow):
         self._stt = stt.SpeechToText(
             model_name=s.whisperModel, device_name=s.micDevice, language=s.sttLanguage,
             noise_gate=s.sttNoiseGate, silence_ms=s.sttSilenceMs, device_pref=s.sttDevice,
+            target=s.sttTarget,
             on_text=self.stt_text_signal.emit, on_status=self.stt_status_signal.emit)
         self._stt.start()
 
@@ -1359,12 +1369,29 @@ class MainWindow(QMainWindow):
             self._stop_stt()
             self._stt_sig = None
 
-    def _on_stt_text(self, text: str):
-        self._stt_text = text
+    def _on_stt_text(self, heard: str, output: str, is_final: bool):
+        self._stt_text = output  # the (possibly translated) text the chatbox sends
         self._stt_text_at = time.monotonic()
         if hasattr(self, "stt_status"):
-            self.stt_status.setText(f"Heard: {text[:60]}")
-        self.log("STT: " + text)
+            prefix = "Heard: " if is_final else "… "
+            if output != heard:
+                self.stt_status.setText(f"{prefix}{heard[:50]}  →  {output[:50]}")
+            else:
+                self.stt_status.setText(f"{prefix}{heard[:60]}")
+        if is_final:
+            self.log(f"STT: {heard}" + (f"  →  {output}" if output != heard else ""))
+            if self._running:
+                self._send_stt_final()
+
+    def _send_stt_final(self):
+        # Push the finished phrase right away with the chatbox notification SFX
+        # so people hear/see it, instead of waiting for the next gated cycle.
+        try:
+            message = build_message(self._build_context(self._current_frame()))
+        except Exception:
+            return
+        self.preview_label.setText(message.replace("\v", "\n"))
+        self._do_send(message, notify=True)
 
     def _on_stt_status(self, status: str):
         if hasattr(self, "stt_status"):
@@ -1575,10 +1602,10 @@ class MainWindow(QMainWindow):
             return self._scroll_chunk()
         return build_message(self._build_context(self._next_frame()))
 
-    def _do_send(self, message: str):
+    def _do_send(self, message: str, notify: bool = False):
         if self._osc is not None:
             try:
-                self._osc.send_chatbox(message, send_now=True)
+                self._osc.send_chatbox(message, send_now=True, notify=notify)
             except Exception as e:
                 self.log(f"Send error: {e}")
         self._last_sent = message

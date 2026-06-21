@@ -224,6 +224,10 @@ SAMPLE_RATE = 16000
 BLOCK = 1600          # 0.1s capture blocks
 MAX_PHRASE_S = 15.0   # force-flush a phrase that runs this long
 MIN_PHRASE_S = 0.4    # ignore blips shorter than this
+PARTIAL_SILENCE_MS = 350   # a brief gap mid-speech triggers a live partial update
+PARTIAL_MIN_INTERVAL = 0.6  # don't emit partials faster than this (seconds)
+# Whisper language codes that Google (deep-translator) names differently.
+_GOOGLE_LANG = {"zh": "zh-CN"}
 
 # Curated model list for the UI. faster-whisper downloads these from Hugging
 # Face on first use and caches them; ".en" variants are English-only and faster.
@@ -387,10 +391,12 @@ def download(model_name: str, on_status: Callable[[str], None] = lambda s: None)
 class _FasterWhisperTranscriber:
     """Lazy-loaded faster-whisper backend. transcribe(float32 mono 16k) -> str."""
 
-    def __init__(self, model_name: str, language: str, device_pref: str = "cpu"):
+    def __init__(self, model_name: str, language: str, device_pref: str = "cpu",
+                 target: str = ""):
         self.model_name = model_name
         self.language = (language or "").strip()
         self.device_pref = (device_pref or "cpu").lower()
+        self.target = (target or "").strip()
         self._model = None
         self.device = "cpu"
         self.fell_back = False  # GPU was requested but CUDA wasn't usable
@@ -447,6 +453,8 @@ class _FasterWhisperTranscriber:
         kwargs = {}
         if self.language and self.language.lower() != "auto":
             kwargs["language"] = self.language
+        if self.target.lower() == "en":
+            kwargs["task"] = "translate"  # Whisper translates any language -> English (offline)
         segments, _info = self._model.transcribe(audio, beam_size=1, **kwargs)
         return " ".join(seg.text.strip() for seg in segments).strip()
 
@@ -456,15 +464,16 @@ class SpeechToText:
 
     def __init__(self, model_name: str = "base.en", device_name: str = "",
                  language: str = "en", noise_gate: float = 0.02,
-                 silence_ms: int = 1500, device_pref: str = "cpu",
-                 on_text: Callable[[str], None] = lambda t: None,
+                 silence_ms: int = 1500, device_pref: str = "cpu", target: str = "",
+                 on_text: Callable[[str, str, bool], None] = lambda heard, output, final: None,
                  on_status: Callable[[str], None] = lambda s: None):
         self.device_name = device_name
         self.noise_gate = float(noise_gate)
         self.silence_ms = int(silence_ms)
+        self.target = (target or "").strip()
         self.on_text = on_text
         self.on_status = on_status
-        self._transcriber = _FasterWhisperTranscriber(model_name, language, device_pref)
+        self._transcriber = _FasterWhisperTranscriber(model_name, language, device_pref, self.target)
 
         self._run = False
         self._stream = None
@@ -478,6 +487,8 @@ class SpeechToText:
         self._speaking = False
         self._last_voice = 0.0
         self._phrase_start = 0.0
+        self._last_partial = 0.0
+        self._partial_pending = False
 
     # -- lifecycle -----------------------------------------------------------
     def start(self):
@@ -560,6 +571,7 @@ class SpeechToText:
         with self._lock:
             self._buf = bytearray()
         self._speaking = False
+        self._partial_pending = False
         self._transcriber._model = None  # release the model promptly
 
     # -- capture / VAD -------------------------------------------------------
@@ -582,23 +594,38 @@ class SpeechToText:
                 self._buf.extend(raw)
             self._last_voice = now
             if now - self._phrase_start >= MAX_PHRASE_S:
-                self._flush()
-        elif self._speaking and (now - self._last_voice) * 1000.0 >= self.silence_ms:
-            self._flush()
+                self._flush(final=True)
+        elif self._speaking:
+            silence = (now - self._last_voice) * 1000.0
+            if silence >= self.silence_ms:
+                self._flush(final=True)  # phrase done -> final result (+ notify)
+            elif (silence >= PARTIAL_SILENCE_MS and not self._partial_pending
+                  and (now - self._last_partial) >= PARTIAL_MIN_INTERVAL):
+                self._queue_partial(now)  # brief gap -> live partial update
 
-    def _flush(self):
+    def _queue_partial(self, now: float):
         with self._lock:
             data = bytes(self._buf)
-            self._buf = bytearray()
-        self._speaking = False
+        if len(data) >= int(self._capture_rate * MIN_PHRASE_S) * 2:
+            self._partial_pending = True
+            self._last_partial = now
+            self._audio_q.put((data, False))
+
+    def _flush(self, final: bool = True):
+        with self._lock:
+            data = bytes(self._buf)
+            if final:
+                self._buf = bytearray()
+        if final:
+            self._speaking = False
         if len(data) >= int(self._capture_rate * MIN_PHRASE_S) * 2:  # int16 = 2 bytes/sample
-            self._audio_q.put(data)
+            self._audio_q.put((data, final))
 
     # -- transcription -------------------------------------------------------
     def _transcribe_loop(self):
         while self._run:
             try:
-                data = self._audio_q.get(timeout=0.2)
+                data, is_final = self._audio_q.get(timeout=0.2)
             except queue.Empty:
                 continue
             if not self._run:
@@ -613,8 +640,26 @@ class SpeechToText:
                             np.linspace(0.0, 1.0, audio.size, endpoint=False),
                             audio,
                         ).astype(np.float32)
-                text = self._transcriber.transcribe(audio)
-                if text:
-                    self.on_text(text)
+                heard = self._transcriber.transcribe(audio)
+                # Non-English target -> translate via Google (English uses Whisper's
+                # offline translate). Partials translate too; the single-in-flight
+                # guard self-throttles the rate so we don't spam the endpoint.
+                output = heard
+                if heard and self.target and self.target.lower() != "en":
+                    output = self._translate_text(heard)
+                if output:
+                    self.on_text(heard, output, is_final)
             except Exception as e:
                 self.on_status(f"Transcription error: {e}")
+            finally:
+                if not is_final:
+                    self._partial_pending = False
+
+    def _translate_text(self, text: str) -> str:
+        try:
+            from deep_translator import GoogleTranslator
+            tgt = _GOOGLE_LANG.get(self.target, self.target)
+            return GoogleTranslator(source="auto", target=tgt).translate(text) or text
+        except Exception as e:
+            self.on_status(f"Translation unavailable ({e}); sent untranslated")
+            return text

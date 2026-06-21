@@ -14,3 +14,4 @@ faster-whisper
 sounddevice
 numpy
 zeroconf
+deep-translator
