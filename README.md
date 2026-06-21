@@ -81,10 +81,7 @@ All keyboard shortcuts can be rebound
  - https://www.youtube.com/watch?v=8D23oUzb-0Q
 
 # Coming soon:
- - Code refactor (In the works)
  - Modular plugins system to replace hardcoded objects
- - Switch to a different ui, most likely to py-qt
- - Speech To Text (Almost Done!)
  - Framerate
  - Ping
  - VR/Desktop Display
