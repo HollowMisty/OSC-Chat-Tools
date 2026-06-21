@@ -1,4 +1,4 @@
-FreeSimpleGUI
+PySide6
 python-osc
 keyboard
 psutil

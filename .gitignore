@@ -1,10 +1,10 @@
 please-do-not-delete.txt
+oct_config.json
+OCT_debug_log.txt
 /build/
 /dist/
-osc-chat-tools.spec
-OCT_debug_log.txt
-/__pycache__/
-.venv/
+*.spec
 __pycache__/
 *.pyc
+.venv/
 .idea/
