@@ -43,7 +43,7 @@ DEFAULT_DARK_COLORS = {
 class Settings:
     # --- messaging ---
     message_delay: float = 1.5
-    messageString: str = "OSC Chat Tools\nBy Lioncat6"
+    messageString: str = ""
     FileToRead: str = ""
     scrollText: bool = False
     sendBlank: bool = True
@@ -56,7 +56,7 @@ class Settings:
     showPaused: bool = True
     songDisplay: str = " \U0001F3B5'{title}' ᵇʸ {artist}\U0001F3B6"
     showOnChange: bool = False
-    songChangeTicks: int = 2
+    songChangeTicks: int = 1
     showSongInfo: bool = True
     useMediaManager: bool = True
     useSpotifyApi: bool = False
@@ -84,6 +84,16 @@ class Settings:
     timeDisplayAM: str = "{hour}:{minute} AM"
     timeDisplayPM: str = "{hour}:{minute} PM"
     useTimeParameters: bool = False
+    # --- speech to text ---
+    sttDisplay: str = "{stt}"
+    sttBackend: str = "faster-whisper"  # swappable backend id (room for moonshine etc.)
+    sttDevice: str = "cpu"  # "cpu" or "cuda" (GPU needs CUDA + cuBLAS/cuDNN installed)
+    whisperModel: str = "base.en"
+    micDevice: str = ""  # "" or "Default" = system default input device
+    sttLanguage: str = "en"  # ISO code, or "auto"
+    sttNoiseGate: float = 0.02  # amplitude 0..1 to count a block as speech
+    sttSilenceMs: int = 1500  # silence (ms) that ends a spoken phrase
+    sttHoldSeconds: int = 8  # how long a transcription stays shown before clearing
     # --- keybinds ---
     keybind_run: str = "`"
     keybind_afk: str = "end"

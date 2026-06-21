@@ -13,15 +13,15 @@ import webbrowser
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea,
-    QSizePolicy, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QRadioButton,
+    QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from .. import __version__, themes, media, updater, heartrate, vrc, keybinds, spotify
+from .. import __version__, themes, media, updater, heartrate, vrc, keybinds, spotify, stt
 from ..config import Settings, load_settings, save_settings, CONFIG_PATH
 from ..chatbox import ChatboxContext, build_message
 from ..osc_io import OSCClient, OSCListener
@@ -43,14 +43,13 @@ ADD_ELEMENTS = [
     ("hr", "\U0001F493HR", "Display Heart Rate", True),
     ("mute", "\U0001F507Mute", "Display Mic Mute Status", True),
     ("playtime", "⌚Play Time", "Show Play Time", True),
-    ("stt", "⌨STT", "Speech recognition object", False),
+    ("stt", "⌨STT", "Speech recognition object", True),
     ("div", "☵Divider", "Horizontal Divider", True),
     ("timer", "⏲️Timer", "Countdown Timer", True),
 ]
 # Section cards on the Home page: (page key, emoji, title)
 HOME_CARDS = [
     ("layout", "\U0001F9E9", "Layout"),
-    ("behavior", "\U0001F916", "Behavior"),
     ("preview", "\U0001F4FA", "Preview"),
     ("options", "\U0001F4BB", "Options"),
     ("osc", "\U0001F4F2", "OSC Options"),
@@ -76,6 +75,19 @@ BEHAVIOR_CARDS = [
 
 _TOKEN_RE = re.compile(r"\{(\w+)\((\d)\)\}")
 
+# (display, Whisper code). "Auto-detect" sits at the top of the dropdown; English
+# is the default selection. Only multilingual models use this (.en models ignore it).
+STT_LANGUAGES = [
+    ("Auto-detect", "auto"), ("English", "en"),
+    ("Arabic", "ar"), ("Chinese", "zh"), ("Czech", "cs"), ("Danish", "da"),
+    ("Dutch", "nl"), ("Finnish", "fi"), ("French", "fr"), ("German", "de"),
+    ("Greek", "el"), ("Hebrew", "he"), ("Hindi", "hi"), ("Hungarian", "hu"),
+    ("Indonesian", "id"), ("Italian", "it"), ("Japanese", "ja"), ("Korean", "ko"),
+    ("Norwegian", "no"), ("Polish", "pl"), ("Portuguese", "pt"), ("Romanian", "ro"),
+    ("Russian", "ru"), ("Spanish", "es"), ("Swedish", "sv"), ("Thai", "th"),
+    ("Turkish", "tr"), ("Ukrainian", "uk"), ("Vietnamese", "vi"),
+]
+
 
 class MainWindow(QMainWindow):
     update_result = Signal(str, bool, str)
@@ -83,6 +95,11 @@ class MainWindow(QMainWindow):
     afk_toggle_signal = Signal()
     spotify_status_signal = Signal(str)
     log_signal = Signal(str)
+    stt_text_signal = Signal(str)
+    stt_status_signal = Signal(str)
+    stt_dl_progress = Signal(str)
+    stt_dl_done = Signal(str)
+    stt_cuda_done = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -120,6 +137,10 @@ class MainWindow(QMainWindow):
         self._last_spotify_err = None
         self._media_now = None
         self._ribbon = None
+        self._stt = None
+        self._stt_text = ""
+        self._stt_text_at = 0.0
+        self._stt_sig = None
 
         self.setWindowTitle("OSC Chat Tools")
         self.resize(960, 680)
@@ -132,6 +153,11 @@ class MainWindow(QMainWindow):
         self.afk_toggle_signal.connect(self.afk_check.toggle)
         self.spotify_status_signal.connect(self._on_spotify_status)
         self.log_signal.connect(self.log)
+        self.stt_text_signal.connect(self._on_stt_text)
+        self.stt_status_signal.connect(self._on_stt_status)
+        self.stt_dl_progress.connect(self._on_stt_dl_progress)
+        self.stt_dl_done.connect(self._on_stt_download_done)
+        self.stt_cuda_done.connect(self._on_cuda_done)
         self._go("home")
         self.log(f"OSC Chat Tools {__version__} started.")
         self._run_update_check(force_popup=False)
@@ -147,6 +173,7 @@ class MainWindow(QMainWindow):
         self._refresh_osc_listener()
         self._refresh_keybinds()
         self._refresh_hr()  # connects now if "pass through HR even when not running" is on
+        self._refresh_stt()
         self._spotify_timer = QTimer(self)
         self._spotify_timer.timeout.connect(self._poll_spotify)
         self._spotify_timer.start(3000)
@@ -159,6 +186,9 @@ class MainWindow(QMainWindow):
                 self.settings.spotify_client_id, self.settings.spotifyAccessToken,
                 self.settings.spotifyRefreshToken, on_tokens=self._save_spotify_tokens)
             self.spotify_status.setText("Linked (saved)")
+
+        # Start in the Run state, matching the original app's default-on behaviour.
+        self.run_check.setChecked(True)
 
     # ----------------------------------------------------------------- menu bar
     def _build_menu(self):
@@ -197,6 +227,9 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self._pages[key])
             if key in ("preview", "home"):
                 self._update_preview()
+            if key == "behavior_stt":
+                self._refresh_model_lists()
+                self._refresh_cuda_ui()
 
     def _card(self, key: str, emoji: str, title: str, enabled: bool = True) -> QPushButton:
         btn = QPushButton(f"{emoji}\n{title}")
@@ -247,7 +280,6 @@ class MainWindow(QMainWindow):
 
         # Home + section hubs
         self._add_page("home", self._grid_page("OSC Chat Tools", HOME_CARDS, 3, None))
-        self._add_page("behavior", self._grid_page("Behavior", BEHAVIOR_CARDS, 4, "home"))
 
         # Top-level section pages
         self._add_page("layout", self._shell("\U0001F9E9 Layout", self._layout_body(), "home", scroll=False))
@@ -258,20 +290,19 @@ class MainWindow(QMainWindow):
         self._add_page("help", self._shell("❓ Help", self._help_body(), "home"))
 
         # Behavior element pages
-        self._add_page("behavior_misc", self._shell("❔ Misc.", self._misc_sub(), "behavior"))
-        self._add_page("behavior_text", self._shell("\U0001F4AC Text", self._text_sub(), "behavior"))
-        self._add_page("behavior_time", self._shell("\U0001F552 Time", self._time_sub(), "behavior"))
-        self._add_page("behavior_song", self._shell("\U0001F3B5 Song", self._song_sub(), "behavior"))
-        self._add_page("behavior_cpu", self._shell("⏱️ CPU", self._template_sub("CPU display.\nVariables: {cpu_percent}", "cpuDisplay"), "behavior"))
-        self._add_page("behavior_ram", self._shell("\U0001F6A6 RAM", self._template_sub("RAM display.\nVariables: {ram_percent}, {ram_available}, {ram_total}, {ram_used}", "ramDisplay"), "behavior"))
-        self._add_page("behavior_gpu", self._shell("⏳ GPU", self._template_sub("GPU display.\nVariables: {gpu_percent}", "gpuDisplay"), "behavior"))
-        self._add_page("behavior_hr", self._shell("\U0001F493 HR", self._hr_sub(), "behavior"))
-        self._add_page("behavior_mute", self._shell("\U0001F507 Mute", self._mute_sub(), "behavior"))
-        self._add_page("behavior_playtime", self._shell("⌚ Play Time", self._template_sub("Play Time display.\nVariables: {hours}, {remainder_minutes}, {minutes}", "playTimeDisplay"), "behavior"))
-        stt = QWidget(); QVBoxLayout(stt).addWidget(QLabel("Coming Soon"))
-        self._add_page("behavior_stt", self._shell("⌨ STT", stt, "behavior"))
-        self._add_page("behavior_div", self._shell("☵ Divider", self._divider_sub(), "behavior"))
-        self._add_page("behavior_timer", self._shell("⏲️ Timer", self._timer_sub(), "behavior"))
+        self._add_page("behavior_misc", self._shell("⚙ Chatbox Options", self._misc_sub(), "layout"))
+        self._add_page("behavior_text", self._shell("\U0001F4AC Text", self._text_sub(), "layout"))
+        self._add_page("behavior_time", self._shell("\U0001F552 Time", self._time_sub(), "layout"))
+        self._add_page("behavior_song", self._shell("\U0001F3B5 Song", self._song_sub(), "layout"))
+        self._add_page("behavior_cpu", self._shell("⏱️ CPU", self._template_sub("CPU display.\nVariables: {cpu_percent}", "cpuDisplay"), "layout"))
+        self._add_page("behavior_ram", self._shell("\U0001F6A6 RAM", self._template_sub("RAM display.\nVariables: {ram_percent}, {ram_available}, {ram_total}, {ram_used}", "ramDisplay"), "layout"))
+        self._add_page("behavior_gpu", self._shell("⏳ GPU", self._template_sub("GPU display.\nVariables: {gpu_percent}", "gpuDisplay"), "layout"))
+        self._add_page("behavior_hr", self._shell("\U0001F493 HR", self._hr_sub(), "layout"))
+        self._add_page("behavior_mute", self._shell("\U0001F507 Mute", self._mute_sub(), "layout"))
+        self._add_page("behavior_playtime", self._shell("⌚ Play Time", self._template_sub("Play Time display.\nVariables: {hours}, {remainder_minutes}, {minutes}", "playTimeDisplay"), "layout"))
+        self._add_page("behavior_stt", self._shell("⌨ STT", self._stt_sub(), "layout"))
+        self._add_page("behavior_div", self._shell("☵ Divider", self._divider_sub(), "layout"))
+        self._add_page("behavior_timer", self._shell("⏲️ Timer", self._timer_sub(), "layout"))
 
         # Persistent bottom bar, styled like the page-header strip.
         bottom = QWidget(); bottom.setObjectName("headerBar")
@@ -300,18 +331,27 @@ class MainWindow(QMainWindow):
 
     def _layout_body(self) -> QWidget:
         w = QWidget(); outer = QVBoxLayout(w)
-        outer.addWidget(self._bind(QCheckBox("Text file read (disables everything else)"), "scrollText", "check"))
+        top = QHBoxLayout()
+        top.addWidget(self._bind(QCheckBox("Text file read (disables everything else)"), "scrollText", "check"))
+        top.addStretch(1)
+        misc_btn = QPushButton("Chatbox Options")
+        misc_btn.clicked.connect(lambda: self._go("behavior_misc"))
+        top.addWidget(misc_btn)
+        outer.addLayout(top)
         cols = QHBoxLayout()
 
         # Add Elements: header + internally-scrolling list (no box)
         left = QWidget(); ll = QVBoxLayout(left); ll.setContentsMargins(0, 0, 0, 0)
         ll.addWidget(self._section_title("Add Elements"))
-        ll.addWidget(QLabel("Every element is customizable from the Behavior section"))
+        ll.addWidget(QLabel("Add an element to your layout, or Edit to customise it"))
         add_rows = QWidget(); al = QVBoxLayout(add_rows)
         for token, label, desc, enabled in ADD_ELEMENTS:
             row = QHBoxLayout()
             row.addWidget(QLabel(label)); row.addStretch(1)
             row.addWidget(QLabel(desc)); row.addStretch(1)
+            edit = QPushButton("Edit")
+            edit.clicked.connect(lambda _=False, t=token: self._go(f"behavior_{t}"))
+            row.addWidget(edit)
             btn = QPushButton("Add" if enabled else "Soon"); btn.setEnabled(enabled)
             btn.clicked.connect(lambda _=False, t=token: self._add_element(t))
             row.addWidget(btn); al.addLayout(row)
@@ -469,6 +509,182 @@ class MainWindow(QMainWindow):
         v.addStretch(1)
         return w
 
+    def _stt_sub(self) -> QWidget:
+        w = QWidget(); v = QVBoxLayout(w)
+        intro = QLabel("Transcribes your mic into the chatbox while Run is on. Add the ⌨STT "
+                       "element to your layout, and use 'Get model' to download more models "
+                       "(needs internet once, then fully offline).")
+        intro.setWordWrap(True); v.addWidget(intro)
+        v.addWidget(QLabel("Display template. Variables: {stt}"))
+        v.addWidget(self._bind(QLineEdit(), "sttDisplay", "text"))
+        f = QFormLayout(); self._stt_form = f
+        self.stt_model_combo = QComboBox()  # only downloaded models
+        f.addRow("Model", self.stt_model_combo)
+        self.stt_device_combo = QComboBox(); self.stt_device_combo.addItems(["CPU", "GPU (CUDA)"])
+        f.addRow("Processing", self.stt_device_combo)
+        self.stt_cuda_btn = QPushButton("Download GPU libraries (CUDA)")
+        self.stt_cuda_btn.clicked.connect(self._download_cuda)
+        f.addRow("GPU support", self.stt_cuda_btn)
+        get_row = QHBoxLayout()
+        self.stt_get_combo = QComboBox()  # models available to download
+        self.stt_get_btn = QPushButton("Download")
+        self.stt_get_btn.clicked.connect(self._download_model)
+        get_row.addWidget(self.stt_get_combo, 1); get_row.addWidget(self.stt_get_btn)
+        gw = QWidget(); gw.setLayout(get_row)
+        f.addRow("Get model", gw)
+        mic_row = QHBoxLayout()
+        self.stt_mic_combo = QComboBox()
+        self.stt_mic_combo.addItem("Default")
+        self.stt_mic_combo.addItems(stt.list_input_devices())
+        mic_refresh = QPushButton("↻"); mic_refresh.setFixedWidth(34)
+        mic_refresh.clicked.connect(self._refresh_mic_list)
+        mic_row.addWidget(self.stt_mic_combo, 1); mic_row.addWidget(mic_refresh)
+        mw = QWidget(); mw.setLayout(mic_row); f.addRow("Microphone", mw)
+        self.stt_lang_combo = QComboBox()
+        for disp, code in STT_LANGUAGES:
+            self.stt_lang_combo.addItem(disp, code)
+        f.addRow("Language", self.stt_lang_combo)
+        v.addLayout(f)
+        v.addWidget(QLabel("Mic sensitivity (lower picks up quieter speech)"))
+        grow = QHBoxLayout()
+        gate = QSlider(Qt.Orientation.Horizontal); gate.setRange(0, 50)
+        self.stt_gate_value = QLabel("0.02")
+        gate.valueChanged.connect(lambda val: self.stt_gate_value.setText(f"{val / 100:.2f}"))
+        grow.addWidget(self._bind(gate, "sttNoiseGate", "slider100")); grow.addWidget(self.stt_gate_value)
+        v.addLayout(grow)
+        v.addWidget(QLabel("Silence before a phrase ends (ms)"))
+        srow = QHBoxLayout()
+        sil = QSlider(Qt.Orientation.Horizontal); sil.setRange(300, 3000); sil.setSingleStep(100)
+        self.stt_sil_value = QLabel("1500 ms")
+        sil.valueChanged.connect(lambda val: self.stt_sil_value.setText(f"{val} ms"))
+        srow.addWidget(self._bind(sil, "sttSilenceMs", "int")); srow.addWidget(self.stt_sil_value)
+        v.addLayout(srow)
+        v.addWidget(QLabel("Keep a transcription shown for (seconds)"))
+        hrow = QHBoxLayout()
+        hold = QSlider(Qt.Orientation.Horizontal); hold.setRange(2, 30)
+        self.stt_hold_value = QLabel("8 s")
+        hold.valueChanged.connect(lambda val: self.stt_hold_value.setText(f"{val} s"))
+        hrow.addWidget(self._bind(hold, "sttHoldSeconds", "int")); hrow.addWidget(self.stt_hold_value)
+        v.addLayout(hrow)
+        self.stt_dl_status = QLabel("")
+        v.addWidget(self.stt_dl_status)
+        self.stt_progress = QProgressBar()
+        self.stt_progress.setTextVisible(False)
+        self.stt_progress.setVisible(False)
+        v.addWidget(self.stt_progress)
+        self.stt_status = QLabel("Idle"); v.addWidget(self.stt_status)
+        v.addStretch(1)
+        return w
+
+    def _refresh_model_lists(self):
+        cached = stt.cached_models()
+        cur = self.settings.whisperModel
+        self.stt_model_combo.blockSignals(True)
+        self.stt_model_combo.clear()
+        self.stt_model_combo.addItems(cached)
+        if cur in cached:
+            self.stt_model_combo.setCurrentText(cur)
+        self.stt_model_combo.blockSignals(False)
+        self.stt_get_combo.blockSignals(True)
+        self.stt_get_combo.clear()
+        self.stt_get_combo.addItems([m for m in stt.MODELS if m not in cached])
+        self.stt_get_combo.blockSignals(False)
+
+    def _refresh_cuda_ui(self):
+        """Hide the CUDA download button once libraries exist; disable the GPU
+        Processing option until they do."""
+        present = stt.cuda_libraries_present()
+        if hasattr(self, "stt_cuda_btn"):
+            # Hide the whole form row (label + button), not just the button.
+            try:
+                self._stt_form.setRowVisible(self.stt_cuda_btn, not present)
+            except Exception:
+                self.stt_cuda_btn.setVisible(not present)
+                lbl = self._stt_form.labelForField(self.stt_cuda_btn)
+                if lbl is not None:
+                    lbl.setVisible(not present)
+        item = self.stt_device_combo.model().item(1)  # 0 = CPU, 1 = GPU (CUDA)
+        if item is not None:
+            item.setEnabled(present)
+            item.setText("GPU (CUDA)" if present else "GPU (CUDA) — download libraries first")
+            if present:
+                item.setData(None, Qt.ItemDataRole.ForegroundRole)
+            else:
+                item.setForeground(QBrush(QColor(140, 140, 140)))  # greyed
+        if not present and self.stt_device_combo.currentText().startswith("GPU"):
+            self.stt_device_combo.setCurrentIndex(0)  # back to CPU
+
+    def _download_model(self):
+        name = self.stt_get_combo.currentText()
+        if not name:
+            return
+        self.stt_get_btn.setEnabled(False)
+        self.stt_dl_status.setText(f"Starting download of {name}...")
+        def worker():
+            try:
+                stt.download(name, self.stt_dl_progress.emit)
+                self.stt_dl_done.emit(name)
+            except Exception as e:
+                self.stt_dl_progress.emit(f"Download failed: {e}")
+                self.stt_dl_done.emit("")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_cuda(self):
+        if stt.cuda_libraries_present():
+            if QMessageBox.question(
+                    self, "CUDA",
+                    "CUDA libraries already appear to be available. Download again?"
+                    ) != QMessageBox.StandardButton.Yes:
+                return
+        if QMessageBox.question(
+                self, "Download GPU libraries",
+                "This downloads ~1.3 GB of NVIDIA CUDA 12 + cuDNN 9 libraries to enable "
+                "GPU speech-to-text. You need an NVIDIA GPU. Continue?"
+                ) != QMessageBox.StandardButton.Yes:
+            return
+        self.stt_cuda_btn.setEnabled(False)
+        self.stt_dl_status.setText("Preparing CUDA download...")
+        def worker():
+            try:
+                stt.download_cuda_libraries(self.stt_dl_progress.emit)
+                self.stt_cuda_done.emit("ok")
+            except Exception as e:
+                self.stt_dl_progress.emit(f"CUDA download failed: {e}")
+                self.stt_cuda_done.emit("")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_cuda_done(self, ok: str):
+        self.stt_cuda_btn.setEnabled(True)
+        self.stt_progress.setVisible(False)
+        if ok:
+            stt.reset_cuda_probe()  # let GPU be used this session without a restart
+            self.stt_dl_status.setText("CUDA installed - set Processing to GPU and Apply.")
+            self._refresh_cuda_ui()
+            QMessageBox.information(
+                self, "CUDA installed",
+                "CUDA libraries installed. Set Processing to GPU (CUDA) and press Apply to "
+                "use GPU acceleration.")
+
+    def _on_stt_download_done(self, name: str):
+        self.stt_get_btn.setEnabled(True)
+        self.stt_progress.setVisible(False)
+        self._refresh_model_lists()
+        if name:
+            self.stt_dl_status.setText(f"{name} ready.")
+            if self.stt_model_combo.findText(name) >= 0:
+                self.stt_model_combo.setCurrentText(name)
+                self.settings.whisperModel = name
+
+    def _refresh_mic_list(self):
+        cur = self.stt_mic_combo.currentText()
+        self.stt_mic_combo.blockSignals(True)
+        self.stt_mic_combo.clear()
+        self.stt_mic_combo.addItem("Default")
+        self.stt_mic_combo.addItems(stt.list_input_devices())
+        if self.stt_mic_combo.findText(cur) >= 0:
+            self.stt_mic_combo.setCurrentText(cur)
+        self.stt_mic_combo.blockSignals(False)
+
     def _mute_sub(self) -> QWidget:
         w = QWidget(); f = QFormLayout(w)
         f.addRow(QLabel("Template to use for Mute Toggle display"))
@@ -556,21 +772,25 @@ class MainWindow(QMainWindow):
 
     def _osc_body(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
-        v.addWidget(QLabel("OSC Options - Experimental (enable debug logging)"))
-        listen = QGroupBox("OSC Listen Options"); lf = QFormLayout(listen)
-        lf.addRow("", self._bind(QCheckBox("Use OSC Listen"), "oscListen", "check"))
-        lf.addRow("Address", self._bind(QLineEdit(), "oscListenAddress", "text"))
-        lf.addRow("Port", self._bind(QLineEdit(), "oscListenPort", "text"))
-        v.addWidget(listen)
-        send = QGroupBox("OSC Send Options"); sf = QFormLayout(send)
+        note = QLabel("OCT receives avatar parameters (mute, AFK) automatically via "
+                      "OSCQuery and coexists with other OSC apps - no setup needed. The "
+                      "options below are advanced/fallback.")
+        note.setWordWrap(True); v.addWidget(note)
+        send = QGroupBox("OSC Send (to VRChat)"); sf = QFormLayout(send)
         sf.addRow("Address", self._bind(QLineEdit(), "oscSendAddress", "text"))
         sf.addRow("Port", self._bind(QLineEdit(), "oscSendPort", "text"))
         v.addWidget(send)
-        fwd = QGroupBox("OSC Forwarding Options"); ff = QFormLayout(fwd)
-        ff.addRow("", self._bind(QCheckBox("Use OSC Forwarding"), "oscForeword", "check"))
-        ff.addRow("Address", self._bind(QLineEdit(), "oscForewordAddress", "text"))
-        ff.addRow("Port", self._bind(QLineEdit(), "oscForewordPort", "text"))
-        v.addWidget(fwd)
+        listen = QGroupBox("OSC Listen (fallback - used only if OSCQuery is unavailable)")
+        lf = QFormLayout(listen)
+        lf.addRow("Address", self._bind(QLineEdit(), "oscListenAddress", "text"))
+        lf.addRow("Port", self._bind(QLineEdit(), "oscListenPort", "text"))
+        v.addWidget(listen)
+        relay = QGroupBox("OSC Relay (forward received params to another PC/device)")
+        rf = QFormLayout(relay)
+        rf.addRow("", self._bind(QCheckBox("Enable relay"), "oscForeword", "check"))
+        rf.addRow("Address", self._bind(QLineEdit(), "oscForewordAddress", "text"))
+        rf.addRow("Port", self._bind(QLineEdit(), "oscForewordPort", "text"))
+        v.addWidget(relay)
         dbg = QGroupBox("Avatar Debugging"); df = QFormLayout(dbg)
         self.debug_path = QLineEdit()
         df.addRow("Path", self.debug_path)
@@ -699,6 +919,14 @@ class MainWindow(QMainWindow):
         self.src_spotify.setChecked(self.settings.useSpotifyApi)
         self.src_media.setChecked(not self.settings.useSpotifyApi)
         self.theme_combo.setCurrentText(self.settings.selectedTheme)
+        self.stt_device_combo.setCurrentText("GPU (CUDA)" if self.settings.sttDevice == "cuda" else "CPU")
+        lang_idx = self.stt_lang_combo.findData(self.settings.sttLanguage or "en")
+        self.stt_lang_combo.setCurrentIndex(lang_idx if lang_idx >= 0 else self.stt_lang_combo.findData("en"))
+        self._refresh_cuda_ui()
+        mic = self.settings.micDevice or "Default"
+        if self.stt_mic_combo.findText(mic) < 0:
+            self.stt_mic_combo.addItem(mic)
+        self.stt_mic_combo.setCurrentText(mic)
         self._custom_colors = dict(self.settings.customColors)
         self._refresh_swatches()
         self._syncing = True
@@ -726,6 +954,12 @@ class MainWindow(QMainWindow):
         self.settings.useSpotifyApi = self.src_spotify.isChecked()
         self.settings.useMediaManager = self.src_media.isChecked()
         self.settings.selectedTheme = self.theme_combo.currentText()
+        if self.stt_model_combo.currentText():  # keep configured model if none downloaded yet
+            self.settings.whisperModel = self.stt_model_combo.currentText()
+        self.settings.sttDevice = "cuda" if self.stt_device_combo.currentText().startswith("GPU") else "cpu"
+        mic = self.stt_mic_combo.currentText()
+        self.settings.micDevice = "" if mic == "Default" else mic
+        self.settings.sttLanguage = self.stt_lang_combo.currentData() or "en"
         self.settings.customColors = dict(self._custom_colors)
         self.settings.keybind_run = self.keybind_run_label.text()
         self.settings.keybind_afk = self.keybind_afk_label.text()
@@ -757,6 +991,7 @@ class MainWindow(QMainWindow):
         self._refresh_hr()
         self._refresh_osc_listener()
         self._refresh_keybinds()
+        self._refresh_stt()
         self.log("Settings applied.")
 
     def _on_reset(self):
@@ -900,6 +1135,7 @@ class MainWindow(QMainWindow):
         self._refresh_hr()
         self._refresh_osc_listener()
         self._refresh_keybinds()
+        self._refresh_stt()
 
     def _message_frames(self) -> list[str]:
         """Split the message into frames (one per line); '*' alone is a blank frame."""
@@ -1041,16 +1277,23 @@ class MainWindow(QMainWindow):
 
     def _refresh_osc_listener(self):
         s = self.settings
-        sig = (s.oscListen, s.oscListenAddress, s.oscListenPort,
+        # Listen whenever something needs incoming avatar parameters: the mute
+        # element, automatic AFK detection (not the AFK keybind), or an explicit
+        # OSC Listen/Forward option. This makes mute/AFK work without the user
+        # having to dig into OSC Options.
+        want = (s.oscListen or s.oscForeword
+                or "{mute" in (s.layoutString or "")
+                or not s.useAfkKeybind)
+        sig = (want, s.oscListenAddress, s.oscListenPort,
                s.oscForeword, s.oscForewordAddress, s.oscForewordPort)
         if sig == self._osc_sig:
             return  # nothing relevant changed; leave the listener running
         self._osc_sig = sig
         self._stop_osc_listener()
-        if not s.oscListen:
+        if not want:
             return
         forward = None
-        if s.oscForeword:
+        if s.oscForeword:  # relay received params on to another device
             try:
                 forward = OSCClient(s.oscForewordAddress, s.oscForewordPort)
             except Exception:
@@ -1061,7 +1304,8 @@ class MainWindow(QMainWindow):
                 on_message=self._on_osc_message, forward_client=forward,
             )
             self._osc_listener.start()
-            self.log(f"OSC listening on {s.oscListenAddress}:{s.oscListenPort}")
+            how = "via OSCQuery" if self._osc_listener.via_oscquery else "on"
+            self.log(f"OSC listening {how} {s.oscListenAddress}:{self._osc_listener.port}")
         except Exception as e:
             self.log(f"OSC listen error: {e}")
             self._osc_listener = None
@@ -1081,6 +1325,76 @@ class MainWindow(QMainWindow):
             self._keybinds.bind("run", s.keybind_run, self.run_toggle_signal.emit)
         if s.keybind_afk:
             self._keybinds.bind("afk", s.keybind_afk, self.afk_toggle_signal.emit)
+
+    # ---------------------------------------------------------- speech to text
+    def _stt_signature(self):
+        s = self.settings
+        return (s.whisperModel, s.micDevice, s.sttLanguage,
+                round(s.sttNoiseGate, 4), int(s.sttSilenceMs), s.sttDevice)
+
+    def _stop_stt(self):
+        if self._stt is not None:
+            self._stt.stop()
+            self._stt = None
+
+    def _start_stt(self):
+        self._stop_stt()
+        import gc
+        gc.collect()  # free the previous ctranslate2 model before loading the next
+        s = self.settings
+        self._stt = stt.SpeechToText(
+            model_name=s.whisperModel, device_name=s.micDevice, language=s.sttLanguage,
+            noise_gate=s.sttNoiseGate, silence_ms=s.sttSilenceMs, device_pref=s.sttDevice,
+            on_text=self.stt_text_signal.emit, on_status=self.stt_status_signal.emit)
+        self._stt.start()
+
+    def _refresh_stt(self):
+        s = self.settings
+        want = ("{stt" in (s.layoutString or "")) and self._running
+        sig = self._stt_signature()
+        if want and (self._stt is None or self._stt_sig != sig):
+            self._start_stt()
+            self._stt_sig = sig
+        elif not want:
+            self._stop_stt()
+            self._stt_sig = None
+
+    def _on_stt_text(self, text: str):
+        self._stt_text = text
+        self._stt_text_at = time.monotonic()
+        if hasattr(self, "stt_status"):
+            self.stt_status.setText(f"Heard: {text[:60]}")
+        self.log("STT: " + text)
+
+    def _on_stt_status(self, status: str):
+        if hasattr(self, "stt_status"):
+            self.stt_status.setText(status)
+        self._update_stt_progress(status)
+        self.log("STT: " + status)
+
+    def _update_stt_progress(self, text: str):
+        if not hasattr(self, "stt_progress"):
+            return
+        bar = self.stt_progress
+        m = re.search(r"(\d+)\s*%", text)
+        low = text.lower()
+        if m:  # download with a real percentage -> determinate bar
+            bar.setRange(0, 100); bar.setValue(int(m.group(1))); bar.setVisible(True)
+        elif any(k in low for k in ("loading", "downloading", "warming", "starting", "constructing")):
+            bar.setRange(0, 0); bar.setVisible(True)  # indeterminate "busy" animation
+        else:  # listening / idle / ready / error / heard
+            bar.setVisible(False)
+
+    def _on_stt_dl_progress(self, text: str):
+        self.stt_dl_status.setText(text)
+        self._update_stt_progress(text)
+
+    def _current_stt_text(self) -> str:
+        if not self._stt_text:
+            return ""
+        if (time.monotonic() - self._stt_text_at) > max(1, self.settings.sttHoldSeconds):
+            return ""
+        return self._stt_text
 
     # ---------------------------------------------------------- Spotify
     def _on_spotify_status(self, msg: str):
@@ -1282,6 +1596,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._stop_hr()
         self._stop_osc_listener()
+        self._stop_stt()
         self._keybinds.unbind_all()
         super().closeEvent(event)
 
@@ -1293,6 +1608,7 @@ class MainWindow(QMainWindow):
         ctx.muted = self._osc_mute
         ctx.play_seconds = vrc.play_seconds()
         ctx.timer_remaining_ms = max(0, self.settings.timerEndStamp - int(_t.time() * 1000))
+        ctx.stt_text = self._current_stt_text()
         if self.settings.useSpotifyApi and self._spotify_now:
             ctx.song_source = "spotify"
             np = self._spotify_now

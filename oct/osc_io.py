@@ -12,6 +12,8 @@ from typing import Callable
 from pythonosc import udp_client, osc_server
 from pythonosc.dispatcher import Dispatcher
 
+from . import oscquery
+
 CHATBOX_INPUT = "/chatbox/input"
 CHATBOX_TYPING = "/chatbox/typing"
 
@@ -41,12 +43,16 @@ class OSCListener:
         port: int | str = 9001,
         on_message: Callable[[str, tuple], None] | None = None,
         forward_client: "OSCClient | None" = None,
+        use_oscquery: bool = True,
     ):
         self.address = address
         self.port = int(port)
         self.on_message = on_message
         self.forward_client = forward_client
+        self.use_oscquery = use_oscquery
+        self.via_oscquery = False  # True if we got our port via OSCQuery
         self._server = None
+        self._oscq = None
         self._thread: threading.Thread | None = None
 
     def _handler(self, addr: str, *args) -> None:
@@ -66,11 +72,43 @@ class OSCListener:
             return
         dispatcher = Dispatcher()
         dispatcher.set_default_handler(self._handler)
+        # Prefer OSCQuery: bind a free port and let VRChat find us via mDNS, so we
+        # coexist with other OSC apps instead of fighting over the fixed port.
+        if self.use_oscquery and oscquery.available():
+            try:
+                osc_port = oscquery.get_open_udp_port()
+                http_port = oscquery.get_open_tcp_port()
+                self._server = osc_server.ThreadingOSCUDPServer((self.address, osc_port), dispatcher)
+                self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+                self._thread.start()
+                self._oscq = oscquery.OSCQueryService(
+                    "OSC Chat Tools", http_port, osc_port, self.address,
+                    endpoints=("/avatar/parameters/MuteSelf", "/avatar/parameters/AFK"))
+                self.port = osc_port
+                self.via_oscquery = True
+                return
+            except Exception:
+                # OSCQuery failed - tear down and fall back to the fixed port.
+                if self._server is not None:
+                    try:
+                        self._server.shutdown()
+                        self._server.server_close()
+                    except Exception:
+                        pass
+                    self._server = None
+                self._oscq = None
+                self.via_oscquery = False
         self._server = osc_server.ThreadingOSCUDPServer((self.address, self.port), dispatcher)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        if self._oscq is not None:
+            try:
+                self._oscq.stop()
+            except Exception:
+                pass
+            self._oscq = None
         if self._server is not None:
             try:
                 self._server.shutdown()

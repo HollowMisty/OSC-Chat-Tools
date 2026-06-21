@@ -41,6 +41,7 @@ class ChatboxContext:
     muted: bool = False
     play_seconds: int = 0
     timer_remaining_ms: int = 0
+    stt_text: str = ""                     # latest speech-to-text transcription
     state: dict = field(default_factory=dict)  # persisted by caller (show-on-change)
 
 
@@ -133,7 +134,7 @@ def _element_value(name: str, ctx: ChatboxContext) -> str:
         minutes, seconds = divmod(remainder, 60)
         return _fmt(s.timerDisplay, hours=f"{hours:02d}", minutes=f"{minutes:02d}", seconds=f"{seconds:02d}")
     if name == "stt":
-        return "Coming Soon"
+        return _fmt(s.sttDisplay, stt=ctx.stt_text or "-")
     if name == "div":
         return s.middleBar
     return ""

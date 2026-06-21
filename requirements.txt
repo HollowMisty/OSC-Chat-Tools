@@ -7,6 +7,10 @@ winrt-Windows.Foundation
 websocket-client
 pyperclip
 flask
-pynvml
+nvidia-ml-py
 tendo
 requests
+faster-whisper
+sounddevice
+numpy
+zeroconf
